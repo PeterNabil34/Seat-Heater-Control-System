@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Delete resource &apos;Seat_Heater_Control_System/FreeRTOS/Source/timers.c&apos;" deleteContents="false" description="Delete resource &apos;Seat_Heater_Control_System/FreeRTOS/Source/timers.c&apos;" element1="/Seat_Heater_Control_System/FreeRTOS/Source/timers.c" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1721463855719"/>
+</session>

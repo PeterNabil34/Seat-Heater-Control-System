@@ -1,0 +1,132 @@
+/******************************************************************************
+ *
+ * Module: ADC
+ *
+ * File Name: adc.c
+ *
+ * Description: Source file for the TM4C123GH6PM ADC driver
+ *
+ * Author: Peter Nabil
+ *
+ *******************************************************************************/
+
+#include"adc.h"
+#include "tm4c123gh6pm_registers.h"
+
+void ADC_Init(void)
+{
+    /* Enable ADC0 & ADC1 clocks */
+    SYSCTL_RCGCADC_REG |= 0x03;
+    while(!(SYSCTL_PRADC_REG & 0x03));
+
+    /* Enable PORTE clock */
+    SYSCTL_RCGCGPIO_REG |= 0x10;
+    while(!(SYSCTL_PRGPIO_REG & 0x10));
+
+
+
+    /* Enable alternative function on PE0 (ADC input pin) */
+    GPIO_PORTE_AFSEL_REG |= (1 << 0);
+
+    /* Disable digital enable on PE0 */
+    GPIO_PORTE_DEN_REG &= ~(1 << 0);
+
+    /* Enable analog mode select on PE0 */
+    GPIO_PORTE_AMSEL_REG |= (1 << 0);
+
+    /* Configure PE0 as input pin */
+    GPIO_PORTE_DIR_REG &= ~(1 << 0);
+
+    GPIO_PORTA_PCTL_REG &= ~(0x0000000F << (0 * 4));
+
+
+
+    /* Enable alternative function on PE1 (ADC input pin) */
+    GPIO_PORTE_AFSEL_REG |= (1 << 1);
+
+    /* Disable digital enable on PE1 */
+    GPIO_PORTE_DEN_REG &= ~(1 << 1);
+
+    /* Enable analog mode select on PE1 */
+    GPIO_PORTE_AMSEL_REG |= (1 << 1);
+
+    /* Configure PE1 as input pin */
+    GPIO_PORTE_DIR_REG &= ~(1 << 1);
+
+
+    /* Disable sample sequencer 0 */
+    ADC0_ADCACTSS_REG &= ~(1 << 0);
+
+    /* Configure trigger event for sequencer 0 (0xF means always sample) */
+    ADC0_ADCEMUX_REG |= 0x0F;
+
+    /* Configure input source for sequencer 0 (PE0/Ain3) */
+    ADC0_ADCSSMUX0_REG = 0x03;
+
+    /* Configure sample control bits for sequencer 0 */
+    ADC0_ADCSSCTL0_REG |= (1 << 1) | (1<<2);
+
+    /*Dither mode enabled*/
+    ADC0_ADCCTL_REG |= (1<<6);
+
+    /* VDDA and GNDA are the voltage references for all ADC modules */
+    ADC0_ADCCTL_REG &= ~(1<<0);
+
+    /* Enable sample sequencer 0 */
+    ADC0_ADCACTSS_REG |= 0x01;
+
+    /* Disable sample sequencer 0 */
+    ADC1_ADCACTSS_REG &= ~(1 << 0);
+
+    /* Configure trigger event for sequencer 0 (0xF means always sample) */
+    ADC1_ADCEMUX_REG |= 0x0F;
+
+    /* Configure input source for sequencer 0 (PE1/Ain2) */
+    ADC1_ADCSSMUX0_REG = 0x02;
+
+    /* Configure sample control bits for sequencer 0 */
+    ADC1_ADCSSCTL0_REG |= (1 << 1) | (1<<2);
+
+    /*Dither mode enabled*/
+    ADC1_ADCCTL_REG |= (1<<6);
+
+    /* VDDA and GNDA are the voltage references for all ADC modules */
+    ADC1_ADCCTL_REG &= ~(1<<0);
+
+    /* Enable sample sequencer 0 */
+    ADC1_ADCACTSS_REG |= 0x01;
+}
+
+uint16 ADC_Read(uint8 analogPin)
+{
+    uint16 digitalValue;
+    if(2 == analogPin)
+    {
+        /* Start SS0 conversion */
+        ADC1_ADCPSSI_REG |= 0x01;
+
+        /* Check if the raw interrupt status is set (Wait for conversion to complete) */
+        while(!(ADC1_ADCRIS_REG & 0x01));
+
+        /* Read the 12-bit result */
+        digitalValue = ADC1_ADCSSFIFO0_REG & 0xFFF; // Mask to 12 bits
+
+        /* Clear the interrupt flag */
+        ADC1_ADCISC_REG |= 0x01;
+    }
+    else if(3 == analogPin)
+    {
+        /* Start SS0 conversion */
+        ADC0_ADCPSSI_REG |= 0x01;
+
+        /* Check if the raw interrupt status is set (Wait for conversion to complete) */
+        while(!(ADC0_ADCRIS_REG & 0x01));
+
+        /* Read the 12-bit result */
+        digitalValue = ADC0_ADCSSFIFO0_REG & 0xFFF;
+
+        /* Clear the interrupt flag */
+        ADC0_ADCISC_REG|=0x01;
+    }
+    return digitalValue;
+}

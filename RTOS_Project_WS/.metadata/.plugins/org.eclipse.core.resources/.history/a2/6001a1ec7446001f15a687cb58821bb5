@@ -1,0 +1,659 @@
+/* Kernel includes. */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "event_groups.h"
+#include "GPTM.h"
+
+/* MCAL includes. */
+#include "gpio.h"
+#include "uart0.h"
+#include "adc.h"
+#include "tm4c123gh6pm_registers.h"
+
+/* HAL includes. */
+#include"potentiometer.h"
+
+/*******************************************************************************
+ *                         Preprocessor Macros                                 *
+ *******************************************************************************/
+/* Definitions for the event bits in the event group. */
+#define SW1_INTERRUPT_EVENT_BIT                  ( 1UL << 0UL )  /* Event bit 0, which is set by a SW1 Interrupt. */
+#define SW2_INTERRUPT_EVENT_BIT                  ( 1UL << 1UL )  /* Event bit 1, which is set by a SW2 Interrupt. */
+#define SW3_INTERRUPT_EVENT_BIT                  ( 1UL << 2UL )  /* Event bit 2, which is set by a SW3 Interrupt. */
+
+#define DRIVER_HEATING_LEVEL_EVENT_BIT           ( 1UL << 3UL )  /* Event bit 3, which is set when the Driver Heating Level changes. */
+#define PASSENGER_HEATING_LEVEL_EVENT_BIT        ( 1UL << 4UL )  /* Event bit 4, which is set when the Passenger Heating Level changes. */
+#define DRIVER_CURRENT_TEMPERATURE_EVENT_BIT     ( 1UL << 5UL )  /* Event bit 5, which is set when the Driver Current Temperature changes. */
+#define PASSENGER_CURRENT_TEMPERATURE_EVENT_BIT  ( 1UL << 6UL )  /* Event bit 6, which is set when the Passenger Current Temperature changes. */
+
+#define DRIVER_TEMPERATURE_FAILURE_EVENT_BIT     ( 1UL << 7UL )  /* Event bit 7, which is set when the Driver Temperature fails. */
+#define PASSENGER_TEMPERATURE_FAILURE_EVENT_BIT  ( 1UL << 8UL )  /* Event bit 8, which is set when the Passenger Temperature fails. */
+
+#define DRIVER_FLAG     0
+#define PASSENGER_FLAG  1
+
+#define DRIVER_ANALOG_PIN 3
+#define PASSENGER_ANALOG_PIN 2
+
+/*******************************************************************************
+ *                         Types Declaration                                   *
+ *******************************************************************************/
+typedef enum
+{
+    HEATING_LEVEL_OFF=0, HEATING_LEVEL_LOW=25, HEATING_LEVEL_MEDIUM=30, HEATING_LEVEL_HIGH=35
+}Heating_Level;
+
+typedef enum
+{
+    HEATER_INTENSITY_DISABLED, HEATER_INTENSITY_LOW, HEATER_INTENSITY_MEDIUM, HEATER_INTENSITY_HIGH
+}Heater_Intensity;
+
+typedef struct
+{
+    Heating_Level heatingLevel;
+    uint8 currentTemperature;
+    Heater_Intensity heaterIntensity;
+}Seat_Information;
+
+typedef struct
+{
+    uint8 seatID;                /* Driver seat or Passenger seat */
+    uint32 timeStamp;            /* Timestamp of when the failure occurred */
+    Heating_Level heatingLevel;  /* Heating Level at the time of failure */
+}Failure_Record;
+
+/*******************************************************************************
+ *                           Global Variables                                  *
+ *******************************************************************************/
+Seat_Information g_driverData;
+Seat_Information g_passengerData;
+
+uint8 g_driverIndex = 0;
+uint8 g_passengerIndex = 1;
+
+uint8 g_driverTemperatureFailureFlag = FALSE;
+uint8 g_passengerTemperatureFailureFlag = FALSE;
+
+Failure_Record failure[2];
+
+/* RunTime Measurements */
+uint32 ullTasksOutTime[8];
+uint32 ullTasksInTime[8];
+uint32 ullTasksExecutionTime[8];
+
+uint8 whichTaskFlag = 0;
+uint32 displayData_TimeAtTake;
+uint32 displayData_TimeAtGive;
+uint32 displayData_LockTime = 0;
+uint32 runTimeMeasurements_TimeAtTake;
+uint32 runTimeMeasurements_TimeAtGive;
+uint32 runTimeMeasurements_LockTime = 0;
+
+/*******************************************************************************
+ *                             Mutexes                                         *
+ *******************************************************************************/
+xSemaphoreHandle uartMutex;
+
+/*******************************************************************************
+ *                          Event Groups                                       *
+ *******************************************************************************/
+EventGroupHandle_t xEventGroup;
+
+/*******************************************************************************
+ *                          Handles of Tasks                                   *
+ *******************************************************************************/
+TaskHandle_t setHeatingLevelTaskHandle;
+TaskHandle_t readTemperatureDriverTaskHandle;
+TaskHandle_t readTemperaturePassengerTaskHandle;
+TaskHandle_t setHeaterIntensityTaskHandle;
+TaskHandle_t displayDataTaskHandle;
+TaskHandle_t temperatureFailureHandlerTaskHandle;
+TaskHandle_t runTimeMeasurementsTaskHandle;
+
+/*******************************************************************************
+ *                      Functions Prototypes                                   *
+ *******************************************************************************/
+/* The HW setup function */
+static void prvSetupHardware( void );
+
+/* FreeRTOS tasks */
+void setHeatingLevel(void *pvParameters);
+void readTemperature(void *pvParameters);
+void setHeaterIntensity(void *pvParameters);
+void displayData(void *pvParameters);
+void temperatureFailureHandler(void *pvParameters);
+void runTimeMeasurements(void *pvParameters);
+
+/*******************************************************************************/
+
+int main(void)
+{
+    /* Setup the hardware for use with the Tiva C board. */
+    prvSetupHardware();
+
+    /* Create a Mutex */
+    uartMutex = xSemaphoreCreateMutex();
+
+    /* Before an event group can be used it must first be created. */
+    xEventGroup = xEventGroupCreate();
+
+    /* Create Tasks here */
+    xTaskCreate(setHeatingLevel, "Heating Level Task", 256, NULL, 6, &setHeatingLevelTaskHandle);
+    xTaskCreate(readTemperature, "Driver Read Temperature Task", 256, (void *)&g_driverIndex, 4, &readTemperatureDriverTaskHandle);
+    xTaskCreate(readTemperature, "Passenger Read Temperature Task", 256, (void *)&g_passengerIndex, 4, &readTemperaturePassengerTaskHandle);
+    xTaskCreate(setHeaterIntensity, "Set Heater Intensity Task", 256, NULL, 3, &setHeaterIntensityTaskHandle);
+    xTaskCreate(displayData, "Display the data on UART", 256, NULL, 2, &displayDataTaskHandle);
+    xTaskCreate(temperatureFailureHandler, "Handle the Temperature Failure case", 256, NULL, 5, &temperatureFailureHandlerTaskHandle);
+    xTaskCreate(runTimeMeasurements, "Calculate Runtime Measurements Task", 256, NULL, 1, &runTimeMeasurementsTaskHandle);
+
+    vTaskSetApplicationTaskTag(setHeatingLevelTaskHandle, ( TaskHookFunction_t ) 1 );
+    vTaskSetApplicationTaskTag(readTemperatureDriverTaskHandle, ( TaskHookFunction_t ) 2 );
+    vTaskSetApplicationTaskTag(readTemperaturePassengerTaskHandle, ( TaskHookFunction_t ) 3 );
+    vTaskSetApplicationTaskTag(setHeaterIntensityTaskHandle, ( TaskHookFunction_t ) 4 );
+    vTaskSetApplicationTaskTag(displayDataTaskHandle, ( TaskHookFunction_t ) 5 );
+    vTaskSetApplicationTaskTag(temperatureFailureHandlerTaskHandle, ( TaskHookFunction_t ) 6 );
+    vTaskSetApplicationTaskTag(runTimeMeasurementsTaskHandle, ( TaskHookFunction_t ) 7 );
+
+
+    /* Now all the tasks have been started - start the scheduler.
+
+    NOTE : Tasks run in system mode and the scheduler runs in Supervisor mode.
+    The processor MUST be in supervisor mode when vTaskStartScheduler is
+    called.  The demo applications included in the FreeRTOS.org download switch
+    to supervisor mode prior to main being called.  If you are not using one of
+    these demo application projects then ensure Supervisor mode is used here. */
+
+    vTaskStartScheduler();
+
+    /* Should never reach here!  If you do then there was not enough heap
+    available for the idle task to be created. */
+    for (;;);
+}
+
+static void prvSetupHardware( void )
+{
+    /* Place here any needed HW initialization such as GPIO, UART, etc.  */
+    GPTM_WTimer0Init();
+    UART0_Init();
+    ADC_Init();
+
+    GPIO_BuiltinButtonsLedsInit();
+
+    GPIO_ExternalSWInit(1, 0);  /* PB0 */
+    GPIO_ExternalLEDInit(1, 1); /* PB1 */
+    GPIO_ExternalLEDInit(0, 2); /* PA2 */
+    GPIO_ExternalLEDInit(0, 3); /* PA3 */
+    GPIO_ExternalLEDInit(0, 4); /* PA4 */
+
+    GPIO_SW1EdgeTriggeredInterruptInit();
+    GPIO_SW2EdgeTriggeredInterruptInit();
+    GPIO_ExternalSWEdgeTriggeredInterruptInit(0, 0);
+}
+
+void setHeatingLevel(void *pvParameters)
+{
+    g_driverData.heatingLevel = HEATING_LEVEL_OFF;
+    g_passengerData.heatingLevel = HEATING_LEVEL_OFF;
+
+    EventBits_t xEventGroupValue;
+    const EventBits_t xBitsToWaitFor = (SW1_INTERRUPT_EVENT_BIT | SW2_INTERRUPT_EVENT_BIT | SW3_INTERRUPT_EVENT_BIT);
+
+    for (;;)
+    {
+        /* Block to wait for event bits to become set within the event group. */
+        xEventGroupValue = xEventGroupWaitBits( xEventGroup,    /* The event group to read. */
+                                                xBitsToWaitFor, /* Bits to test. */
+                                                pdFALSE,        /* Clear bits on exit if the unblock condition is met. */
+                                                pdFALSE,        /* Don't wait for all bits. */
+                                                portMAX_DELAY); /* Don't time out. */
+
+        if(((xEventGroupValue & SW1_INTERRUPT_EVENT_BIT) != 0) || ((xEventGroupValue & SW3_INTERRUPT_EVENT_BIT) != 0))
+        {
+            xEventGroupClearBits(xEventGroup, (SW1_INTERRUPT_EVENT_BIT | SW3_INTERRUPT_EVENT_BIT));
+            switch(g_driverData.heatingLevel)
+            {
+                case HEATING_LEVEL_OFF:
+                    g_driverData.heatingLevel = HEATING_LEVEL_LOW;
+                    break;
+
+                case HEATING_LEVEL_LOW:
+                    g_driverData.heatingLevel = HEATING_LEVEL_MEDIUM;
+                    break;
+
+                case HEATING_LEVEL_MEDIUM:
+                    g_driverData.heatingLevel = HEATING_LEVEL_HIGH;
+                    break;
+
+                case HEATING_LEVEL_HIGH:
+                    g_driverData.heatingLevel = HEATING_LEVEL_OFF;
+                    break;
+                default:
+                    break;
+            }
+            xEventGroupSetBits(xEventGroup, DRIVER_HEATING_LEVEL_EVENT_BIT);
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+        if((xEventGroupValue & SW2_INTERRUPT_EVENT_BIT) != 0)
+        {
+            xEventGroupClearBits(xEventGroup, SW2_INTERRUPT_EVENT_BIT);
+            switch(g_passengerData.heatingLevel)
+            {
+                case HEATING_LEVEL_OFF:
+                    g_passengerData.heatingLevel = HEATING_LEVEL_LOW;
+                    break;
+
+                case HEATING_LEVEL_LOW:
+                    g_passengerData.heatingLevel = HEATING_LEVEL_MEDIUM;
+                    break;
+
+                case HEATING_LEVEL_MEDIUM:
+                    g_passengerData.heatingLevel = HEATING_LEVEL_HIGH;
+                    break;
+
+                case HEATING_LEVEL_HIGH:
+                    g_passengerData.heatingLevel = HEATING_LEVEL_OFF;
+                    break;
+                default:
+                    break;
+            }
+            xEventGroupSetBits(xEventGroup, PASSENGER_HEATING_LEVEL_EVENT_BIT);
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+    }
+}
+
+void readTemperature(void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    for(;;)
+    {
+        if(DRIVER_FLAG == *(uint8 *) pvParameters)
+        {
+            g_driverData.currentTemperature = LM35_getTemperature(DRIVER_ANALOG_PIN);
+
+            if((g_driverData.currentTemperature >= 5) && (g_driverData.currentTemperature <= 40))
+            {
+                g_driverTemperatureFailureFlag = FALSE;
+                GPIO_DriverRedLedOff();
+                xEventGroupSetBits(xEventGroup, DRIVER_CURRENT_TEMPERATURE_EVENT_BIT);
+            }
+            else
+            {
+                g_driverTemperatureFailureFlag = TRUE;
+                xEventGroupSetBits(xEventGroup, DRIVER_TEMPERATURE_FAILURE_EVENT_BIT);
+            }
+        }
+        else if(PASSENGER_FLAG == *(uint8 *) pvParameters)
+        {
+            g_passengerData.currentTemperature = LM35_getTemperature(PASSENGER_ANALOG_PIN);
+
+            if((g_passengerData.currentTemperature >= 5) && (g_passengerData.currentTemperature <= 40))
+            {
+                g_passengerTemperatureFailureFlag = FALSE;
+                GPIO_PassengerRedLedOff();
+                xEventGroupSetBits(xEventGroup, PASSENGER_CURRENT_TEMPERATURE_EVENT_BIT);
+            }
+            else
+            {
+                g_passengerTemperatureFailureFlag = TRUE;
+                xEventGroupSetBits(xEventGroup, PASSENGER_TEMPERATURE_FAILURE_EVENT_BIT);
+            }
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+void setHeaterIntensity(void *pvParameters)
+{
+    sint8 driverDifferenceValue;
+    sint8 passengerDifferenceValue;
+
+    EventBits_t xEventGroupValue;
+    const EventBits_t xBitsToWaitFor = (DRIVER_HEATING_LEVEL_EVENT_BIT | PASSENGER_HEATING_LEVEL_EVENT_BIT | DRIVER_CURRENT_TEMPERATURE_EVENT_BIT | PASSENGER_CURRENT_TEMPERATURE_EVENT_BIT);
+
+    for(;;)
+    {
+        /* Block to wait for event bits to become set within the event group. */
+        xEventGroupValue = xEventGroupWaitBits( xEventGroup,    /* The event group to read. */
+                                                xBitsToWaitFor, /* Bits to test. */
+                                                pdFALSE,        /* Unclear bits on exit if the unblock condition is met. */
+                                                pdFALSE,        /* Don't wait for all bits. */
+                                                portMAX_DELAY); /* Don't time out. */
+
+        if(((xEventGroupValue & DRIVER_HEATING_LEVEL_EVENT_BIT) != 0) || ((xEventGroupValue & DRIVER_CURRENT_TEMPERATURE_EVENT_BIT) != 0))
+        {
+            xEventGroupClearBits(xEventGroup, (DRIVER_HEATING_LEVEL_EVENT_BIT | DRIVER_CURRENT_TEMPERATURE_EVENT_BIT));
+            if(g_driverTemperatureFailureFlag == FALSE)
+            {
+                driverDifferenceValue = (g_driverData.heatingLevel - g_driverData.currentTemperature);
+
+                if(driverDifferenceValue > 10)  /* Cyan LED */
+                {
+                    GPIO_BlueLedOn();
+                    GPIO_GreenLedOn();
+                    g_driverData.heaterIntensity = HEATER_INTENSITY_HIGH;
+                }
+                else if((driverDifferenceValue > 5) && (driverDifferenceValue <= 10))  /* Blue LED */
+                {
+                    GPIO_GreenLedOff();
+                    GPIO_BlueLedOn();
+                    g_driverData.heaterIntensity = HEATER_INTENSITY_MEDIUM;
+                }
+                else if((driverDifferenceValue >= 2) && (driverDifferenceValue <= 5))  /* Green LED */
+                {
+                    GPIO_BlueLedOff();
+                    GPIO_GreenLedOn();
+                    g_driverData.heaterIntensity = HEATER_INTENSITY_LOW;
+                }
+                else if(driverDifferenceValue < 2)  /* All LEDs off */
+                {
+                    GPIO_BlueLedOff();
+                    GPIO_GreenLedOff();
+                    g_driverData.heaterIntensity = HEATER_INTENSITY_DISABLED;
+                }
+                else
+                {
+                    /* Do Nothing*/
+                }
+            }
+            else
+            {
+                /* Do Nothing*/
+            }
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+        if(((xEventGroupValue & PASSENGER_HEATING_LEVEL_EVENT_BIT) != 0) || ((xEventGroupValue & PASSENGER_CURRENT_TEMPERATURE_EVENT_BIT) != 0))
+        {
+            xEventGroupClearBits(xEventGroup, PASSENGER_HEATING_LEVEL_EVENT_BIT | PASSENGER_CURRENT_TEMPERATURE_EVENT_BIT);
+            if(g_passengerTemperatureFailureFlag == FALSE)
+            {
+                passengerDifferenceValue = (g_passengerData.heatingLevel - g_passengerData.currentTemperature);
+
+                if(passengerDifferenceValue > 10)  /* Cyan LED */
+                {
+                    GPIO_PassengerBlueLedOn();
+                    GPIO_PassengerGreenLedOn();
+                    g_passengerData.heaterIntensity = HEATER_INTENSITY_HIGH;
+                }
+                else if((passengerDifferenceValue > 5) && (passengerDifferenceValue <= 10))  /* Blue LED */
+                {
+                    GPIO_PassengerGreenLedOff();
+                    GPIO_PassengerBlueLedOn();
+                    g_passengerData.heaterIntensity = HEATER_INTENSITY_MEDIUM;
+                }
+                else if((passengerDifferenceValue >= 2) && (passengerDifferenceValue <= 5))  /* Green LED */
+                {
+                    GPIO_PassengerBlueLedOff();
+                    GPIO_PassengerGreenLedOn();
+                    g_passengerData.heaterIntensity = HEATER_INTENSITY_LOW;
+                }
+                else if(passengerDifferenceValue < 2)  /* All LEDs off */
+                {
+                    GPIO_PassengerBlueLedOff();
+                    GPIO_PassengerGreenLedOff();
+                    g_passengerData.heaterIntensity = HEATER_INTENSITY_DISABLED;
+                }
+                else
+                {
+                    /* Do Nothing*/
+                }
+            }
+            else
+            {
+                /* Do Nothing*/
+            }
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+    }
+}
+
+void displayData(void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    for(;;)
+    {
+        if(xSemaphoreTake(uartMutex, portMAX_DELAY) == pdTRUE)
+        {
+            UART0_SendString("\033[2J");  /* Clear the entire screen */
+            UART0_SendString("\033[H");   /* Move cursor to the top-left corner */
+            UART0_SendString("\t\tDriver Seat ");
+            UART0_SendString("\t  Passenger Seat ");
+            UART0_SendString("\r\n\nHeating Level:          ");
+            switch(g_driverData.heatingLevel)
+            {
+                case HEATING_LEVEL_OFF:
+                    UART0_SendString("OFF");
+                    break;
+                case HEATING_LEVEL_LOW:
+                    UART0_SendString("LOW");
+                    break;
+                case HEATING_LEVEL_MEDIUM:
+                    UART0_SendString("MEDIUM");
+                    break;
+                case HEATING_LEVEL_HIGH:
+                    UART0_SendString("HIGH");
+                    break;
+                default:
+                    break;
+            }
+            UART0_SendString("                 ");
+            switch(g_passengerData.heatingLevel)
+            {
+                case HEATING_LEVEL_OFF:
+                    UART0_SendString("OFF");
+                    break;
+                case HEATING_LEVEL_LOW:
+                    UART0_SendString("LOW");
+                    break;
+                case HEATING_LEVEL_MEDIUM:
+                    UART0_SendString("MEDIUM");
+                    break;
+                case HEATING_LEVEL_HIGH:
+                    UART0_SendString("HIGH");
+                    break;
+                default:
+                    break;
+            }
+            UART0_SendString("\r\n\nCurrent Temperature:    ");
+            UART0_SendInteger(g_driverData.currentTemperature);
+            UART0_SendString("                   ");
+            UART0_SendInteger(g_passengerData.currentTemperature);
+
+            UART0_SendString("\r\n\nHeater Intensity:       ");
+            switch(g_driverData.heaterIntensity)
+            {
+                case HEATER_INTENSITY_DISABLED:
+                    UART0_SendString("DISABLED");
+                    break;
+                case HEATER_INTENSITY_LOW:
+                    UART0_SendString("LOW");
+                    break;
+                case HEATER_INTENSITY_MEDIUM:
+                    UART0_SendString("MEDIUM");
+                    break;
+                case HEATER_INTENSITY_HIGH:
+                    UART0_SendString("HIGH");
+                    break;
+                default:
+                    break;
+            }
+            UART0_SendString("                 ");
+            switch(g_passengerData.heaterIntensity)
+            {
+                case HEATER_INTENSITY_DISABLED:
+                    UART0_SendString("DISABLED");
+                    break;
+                case HEATER_INTENSITY_LOW:
+                    UART0_SendString("LOW");
+                    break;
+                case HEATER_INTENSITY_MEDIUM:
+                    UART0_SendString("MEDIUM");
+                    break;
+                case HEATER_INTENSITY_HIGH:
+                    UART0_SendString("HIGH");
+                    break;
+                default:
+                    break;
+            }
+            xSemaphoreGive(uartMutex);  /* Release the peripheral */
+        }
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+void temperatureFailureHandler(void *pvParameters)
+{
+    EventBits_t xEventGroupValue;
+    const EventBits_t xBitsToWaitFor = (DRIVER_TEMPERATURE_FAILURE_EVENT_BIT | PASSENGER_TEMPERATURE_FAILURE_EVENT_BIT);
+
+    for(;;)
+    {
+        /* Block to wait for event bits to become set within the event group. */
+        xEventGroupValue = xEventGroupWaitBits( xEventGroup,    /* The event group to read. */
+                                                xBitsToWaitFor, /* Bits to test. */
+                                                pdFALSE,        /* Unclear bits on exit if the unblock condition is met. */
+                                                pdFALSE,        /* Don't wait for all bits. */
+                                                portMAX_DELAY); /* Don't time out. */
+
+        if((xEventGroupValue & DRIVER_TEMPERATURE_FAILURE_EVENT_BIT) != 0)
+        {
+            xEventGroupClearBits(xEventGroup, DRIVER_TEMPERATURE_FAILURE_EVENT_BIT);
+            GPIO_DriverRedLedOn();
+            GPIO_BlueLedOff();
+            GPIO_GreenLedOff();
+            g_driverData.heaterIntensity = HEATER_INTENSITY_DISABLED;
+            failure[g_driverIndex].seatID = DRIVER_FLAG;
+            failure[g_driverIndex].heatingLevel = g_driverData.heatingLevel;
+            failure[g_driverIndex].timeStamp = GPTM_WTimer0Read();
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+        if((xEventGroupValue & PASSENGER_TEMPERATURE_FAILURE_EVENT_BIT) != 0)
+        {
+            xEventGroupClearBits(xEventGroup, PASSENGER_TEMPERATURE_FAILURE_EVENT_BIT);
+            GPIO_PassengerRedLedOn();
+            GPIO_PassengerBlueLedOff();
+            GPIO_PassengerGreenLedOff();
+            g_passengerData.heaterIntensity = HEATER_INTENSITY_DISABLED;
+            failure[g_passengerIndex].seatID = PASSENGER_FLAG;
+            failure[g_passengerIndex].heatingLevel = g_passengerData.heatingLevel;
+            failure[g_passengerIndex].timeStamp = GPTM_WTimer0Read();
+        }
+        else
+        {
+            /* Do Nothing*/
+        }
+    }
+}
+
+void runTimeMeasurements(void *pvParameters)
+{
+    uint8 ucCounter, ucCPU_Load;
+    uint32 ullTotalTasksTime = 0;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    for(;;)
+    {
+        ullTotalTasksTime = 0;
+        for(ucCounter = 1; ucCounter < 8; ucCounter++)
+        {
+            ullTotalTasksTime += ullTasksExecutionTime[ucCounter];
+        }
+        ucCPU_Load = (ullTotalTasksTime * 100) /  GPTM_WTimer0Read();
+
+        if(xSemaphoreTake(uartMutex, portMAX_DELAY) == pdTRUE)
+        {
+            UART0_SendString("\n\nIdle task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[0] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("setHeatingLevel task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[1] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("readTemperature (Driver) task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[2] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("readTemperature (Passenger) task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[3] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("setHeaterIntensity task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[4] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("displayData task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[5] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("temperatureFailureHandler task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[6] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("runTimeMeasurements task execution time is ");
+            UART0_SendInteger(ullTasksExecutionTime[7] / 10);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("CPU Load is ");
+            UART0_SendInteger(ucCPU_Load);
+            UART0_SendString("% \r\n");
+            UART0_SendString("UART Lock Time by the displayData task is ");
+            UART0_SendInteger(displayData_LockTime);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("% \r\n");
+            UART0_SendString("UART Lock Time by the runTimeMeasurements task is ");
+            UART0_SendInteger(runTimeMeasurements_LockTime);
+            UART0_SendString(" msec \r\n");
+            UART0_SendString("% \r\n");
+            UART0_SendString("% \r\n");
+            xSemaphoreGive(uartMutex);  /* Release the peripheral */
+        }
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+void GPIOPortF_Handler(void)
+{
+    BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+    if(GPIO_PORTF_RIS_REG & (1<<0))           /* PF0 handler code */
+    {
+        xEventGroupSetBitsFromISR(xEventGroup, SW1_INTERRUPT_EVENT_BIT,&pxHigherPriorityTaskWoken);
+        GPIO_PORTF_ICR_REG   |= (1<<0);       /* Clear Trigger flag for PF0 (Interrupt Flag) */
+    }
+    else if(GPIO_PORTF_RIS_REG & (1<<4))      /* PF4 handler code */
+    {
+        xEventGroupSetBitsFromISR(xEventGroup, SW2_INTERRUPT_EVENT_BIT,&pxHigherPriorityTaskWoken);
+        GPIO_PORTF_ICR_REG   |= (1<<4);       /* Clear Trigger flag for PF4 (Interrupt Flag) */
+    }
+    else
+    {
+        /* Do Nothing*/
+    }
+}
+
+void GPIOPortA_Handler(void)
+{
+    BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+    if(GPIO_PORTA_RIS_REG & (1<<0))           /* PA0 handler code */
+    {
+        xEventGroupSetBitsFromISR(xEventGroup, SW3_INTERRUPT_EVENT_BIT,&pxHigherPriorityTaskWoken);
+        GPIO_PORTA_ICR_REG |= (1<<0);       /* Clear Trigger flag for PA0 (Interrupt Flag) */
+    }
+    else
+    {
+        /* Do Nothing*/
+    }
+}
+
+/*-----------------------------------------------------------*/
