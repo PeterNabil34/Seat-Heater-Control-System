@@ -13,7 +13,7 @@ System Features:\
 3- Event-based tasks are managed using event flags.\
 4- High responsiveness to buttons is achieved through interrupts to minimize CPU load.\
 5- ADC triggers an interrupt when conversion is finished.\
-6- Manual Runtime Measurements is done with the following Performance Metrics:\
+6- Manual Runtime Measurements is done with the following Performance Metrics:
 - CPU Load: 41%
 - Tasks execution time and Resource lock time per task for each resource are documented in the project documentation.
 7- SimSo Simulation check to ensure that there is no task exceeded its deadline.\
