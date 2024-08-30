@@ -24,6 +24,3 @@ MCAL Modules Developed and Used:
 GPIO, UART, NVIC, GPTM and ADC.
 
 Project Documentation: https://drive.google.com/file/d/10PHqsYcIHqduw4DAkD-4gidfMzhUFVXH/view?usp=drive_link
-=======
-Project Documentation: https://drive.google.com/file/d/10PHqsYcIHqduw4DAkD-4gidfMzhUFVXH/view?usp=drive_link
->>>>>>> ea5fca83d012ff9fde683c078164d2c0423def79
