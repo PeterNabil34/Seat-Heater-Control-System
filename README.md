@@ -14,9 +14,9 @@ System Features:\
 4- High responsiveness to buttons is achieved through interrupts to minimize CPU load.\
 5- ADC triggers an interrupt when conversion is finished.\
 6- SimSo Simulation check to ensure that there is no task exceeded its deadline.\
-7- Manual Runtime Measurements is done with the following Performance Metrics:
--CPU Load: 41%\
--Tasks execution time and resource lock time per task for each resource are documented in the project documentation.
+7- Manual Runtime Measurements is done with the following Performance Metrics:\
+----CPU Load: 41%\
+----Tasks execution time and resource lock time per task for each resource are documented in the project documentation.
 
 MCAL Modules Developed and Used:\
 GPIO, UART, NVIC, GPTM and ADC.\
