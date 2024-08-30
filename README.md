@@ -1,5 +1,6 @@
 # Seat-Heater-Control-System
 It is a system that controls the seat heater for the front two seats (driver seat and passenger seat) in a car using the TM4C123GH6PM microcontroller and FreeRTOS.
+<<<<<<< HEAD
 
 Each seat includes:
 - A button used to take the input level required to set the seat temperature.
@@ -23,3 +24,6 @@ MCAL Modules Developed and Used:
 GPIO, UART, NVIC, GPTM and ADC.
 
 Project Documentation: https://drive.google.com/file/d/10PHqsYcIHqduw4DAkD-4gidfMzhUFVXH/view?usp=drive_link
+=======
+Project Documentation: https://drive.google.com/file/d/10PHqsYcIHqduw4DAkD-4gidfMzhUFVXH/view?usp=drive_link
+>>>>>>> ea5fca83d012ff9fde683c078164d2c0423def79
