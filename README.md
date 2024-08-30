@@ -16,6 +16,7 @@ System Features:\
 6- Manual Runtime Measurements is done with the following Performance Metrics:
 - CPU Load: 41%
 - Tasks execution time and Resource lock time per task for each resource are documented in the project documentation.
+
 7- SimSo Simulation check to ensure that there is no task exceeded its deadline.\
 \
 MCAL Modules Developed and Used:\
